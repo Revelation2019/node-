@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="X-UA-Compatible" content="ie=edge">
+  <title>大文件上传</title>
+  <script src="https://cdn.bootcss.com/jquery/3.4.0/jquery.min.js"></script>
+  <!-- SparkMD5 is a fast md5 implementation of the MD5 algorithm.  -->
+  <script src="https://cdn.bootcss.com/spark-md5/3.0.0/spark-md5.js"></script>
+</head>
+<body>
+  <input type="file" name="file" id="file">
+</body>
+</html>
+<script>
+  let baseUrl = 'http://localhost:8888';
+  let chunkSize = 2 * 1024 * 1024; // 每次读取2M
+  let fileSize = 0
+  let file = null
+  $('#file').on('change', function() {
+    file = this.files[0];
+    fileSize = file.size;
+    change(file);
+  })
+
+  async function change(file) {
+    // 1、生成文件MD5值
+    let fileMD5 = await generateFileMD5(file);
+    console.log('文件的MD5值:', fileMD5);
+    // 2、校验文件MD5值，向服务端发送校验接口请求
+    let result = await checkFileMD5(file.name, fileMD5);
+    if (result.file) {
+      alert('文件已存在')
+      return;
+    }
+    // 3、分片上传
+    await uploadChunk(fileMD5, result.chunkList)
+    // 4、通知服务器分片上传完成，要求合并文件
+    notify(fileMD5)
+  }
+
+  // 生成文件MD5值
+  function generateFileMD5(file) {
+    return new Promise((resolve, reject) => {
+      var blobSlice = File.prototype.slice || File.prototype.mozSlice || File.prototype.webkitSlice,
+          chunks = Math.ceil(fileSize / chunkSize), // 数据块数量
+          curChunk = 0, // 当前块
+          spark = new SparkMD5.ArrayBuffer(),
+          fileReader = new FileReader();
+
+      // 监听文件块读取完毕
+      fileReader.onload = function(e) {
+        console.log('read chunk nr', curChunk + 1, 'of', chunks);
+        spark.append(e.target.result); // 追加到ArrayBuffer中
+        curChunk += 1;
+
+        if (curChunk > chunks) {
+          console.log('文件读取完毕');
+          // 返回文件哈希值
+          resolve(spark.end());
+        } else {
+          loadNext();
+        }
+      }
+
+      // 文件块读取失败
+      fileReader.onerror = function(e) {
+        console.log('文件块读取产生错误');
+      }
+
+      function loadNext() {
+        var start = curChunk * chunkSize,
+            end = ((start + chunkSize) > fileSize) ? fileSize : start + chunkSize;
+
+        // 将文件数据读到ArrayBuffer中
+        fileReader.readAsArrayBuffer(blobSlice.call(file, start, end));
+      }
+
+      loadNext();
+    })
+  }
+
+  // 校验文件MD5值
+  function checkFileMD5(fileName, fileMD5) {
+    return new Promise(resolve => {
+      let url = baseUrl + '/check/file?fileName=' + fileName + '&fileMD5=' + fileMD5;
+      $.getJSON(url, function(data) {
+        resolve(data);
+      })
+    })
+  }
+
+  // 分片上传
+  async function uploadChunk(fileMD5, chunkList) {
+    let chunks = Math.ceil(fileSize / chunkSize);
+    for(let i = 0; i < chunks; i++) {
+      let exit = chunkList.indexOf(i + '') > -1;
+      if (!exit) {
+        // 上传不存在的数据块
+        let res = await upload(i, fileMD5);
+      }
+    }
+
+  }
+  function upload(i, fileMD5) {
+    return new Promise((resolve, reject) => {
+      let end = (i + 1) * chunkSize >= fileSize ? fileSize : (i + 1) * chunkSize;
+      let form = new FormData();
+      let blobSlice = File.prototype.slice || File.prototype.mozSlice || File.prototype.webkitSlice;
+      form.append('chunk', blobSlice.call(file, i * chunkSize, end));
+      form.append('fileMD5', fileMD5);
+      form.append('folder', i);
+      $.ajax({
+        url: baseUrl + '/upload',
+        type: 'POST',
+        data: form,
+        async: true,
+        processData: false,
+        contentType: false,
+        success: function(res) {
+          resolve(res)
+        }
+      })
+    })
+  }
+
+  function notify(fileMD5) {
+    let url = baseUrl + '/merge?md5=' + fileMD5 + "&fileName=" + file.name
+    $.getJSON(url, function (data) {
+        alert('上传成功')
+    })
+  }
+</script>
